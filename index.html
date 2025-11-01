@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Perya — Shooting Gallery (Deluxe)</title>
+<style>
+  :root { --bg:#fff7e6; --card:#fff; --shadow:0 10px 30px rgba(0,0,0,.08); }
+  * { box-sizing:border-box }
+  body { margin:0; padding:16px; display:grid; place-items:center; background:var(--bg); font-family:system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  .app { width:100%; max-width:980px; background:var(--card); border-radius:20px; box-shadow:var(--shadow); padding:16px; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+  h1 { font-size:18px; margin:0 }
+  .hud { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .pill { background:#111; color:#fff; padding:8px 12px; border-radius:999px; font-weight:700; }
+  .btn { border:1px solid #ddd; background:#fafafa; padding:10px 14px; border-radius:12px; font-weight:600; cursor:pointer; }
+  .btn.primary { background:#111; color:#fff; border-color:#111; }
+  #gamewrap { margin-top:12px; border-radius:14px; overflow:hidden; box-shadow:inset 0 0 0 2px rgba(0,0,0,.06); }
+  canvas { display:block; width:100%; height:auto; background:linear-gradient(#fefefe,#f6f6f6); cursor:none; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:8px }
+  .note { font-size:13px; opacity:.8; margin-top:10px }
+  select, input[type=number] { padding:6px 10px; border-radius:10px; border:1px solid #ddd; }
+  details summary { cursor:pointer; font-weight:700 }
+  .stat { background:#f6f6f6; border-radius:10px; padding:6px 10px; font-size:13px }
+</style>
+</head>
+<body>
+  <div class="app" role="application" aria-label="Perya Shooting Gallery">
+    <header>
+      <h1>🔫 Perya — Shooting Gallery <span style="font-weight:400">Deluxe</span></h1>
+      <div class="hud">
+        <div class="pill">Tokens: <span id="bank">100</span></div>
+        <div class="stat">Ammo: <span id="ammo">12</span></div>
+        <div class="stat">Hits: <span id="hits">0</span></div>
+        <div class="stat">Accuracy: <span id="acc">0%</span></div>
+        <div class="stat">Streak x<span id="streak">1</span></div>
+        <div>Bet:
+          <select id="bet">
+            <option>1</option><option selected>5</option><option>10</option><option>20</option><option>50</option>
+          </select>
+        </div>
+        <button class="btn" id="newRound">New Round</button>
+        <button class="btn primary" id="start">Start (stake bet)</button>
+      </div>
+    </header>
+
+    <details class="row">
+      <summary>Settings (Fair spawn & difficulty)</summary>
+      <div class="row">
+        <label>Bottles: <input id="nB" type="number" min="0" max="20" value="6"></label>
+        <label>Cans: <input id="nC" type="number" min="0" max="20" value="6"></label>
+        <label>Ducks: <input id="nD" type="number" min="0" max="20" value="8"></label>
+        <label>Ammo: <input id="nAmmo" type="number" min="5" max="30" value="12"></label>
+        <label>Wind: 
+          <select id="wind"><option value="0" selected>Off</option><option value="1">On (subtle)</option></select>
+        </label>
+      </div>
+      <div class="row" style="font-size:13px;opacity:.8">
+        Tip: Ducks are smaller & faster (harder to hit). Press <b>R</b> to reload when ammo is 0.
+      </div>
+    </details>
+
+    <div id="gamewrap">
+      <canvas id="c" width="960" height="540" aria-label="Shooting Gallery Canvas"></canvas>
+    </div>
+
+    <p class="note">
+      Controls: Move to aim, **click** to shoot. Ammo shows at top (reload on **R**).  
+      Payouts — Bottle: <b>1×</b>, Can: <b>2×</b>, Golden Duck: <b>3×</b>. Tokens are for fun only.
+    </p>
+  </div>
+
+<script>
+/* =================== UI / State =================== */
+const bankEl = document.querySelector('#bank');
+const ammoEl = document.querySelector('#ammo');
+const hitsEl = document.querySelector('#hits');
+const accEl  = document.querySelector('#acc');
+const streakEl = document.querySelector('#streak');
+const betEl  = document.querySelector('#bet');
+const startBtn = document.querySelector('#start');
+const newBtn   = document.querySelector('#newRound');
+
+const nB = document.querySelector('#nB');
+const nC = document.querySelector('#nC');
+const nD = document.querySelector('#nD');
+const nAmmo = document.querySelector('#nAmmo');
+const windSel = document.querySelector('#wind');
+
+let bank = parseInt(localStorage.getItem('perya_bank_gallery_dx') || '100',10);
+function setBank(v){ bank = Math.max(0,v); bankEl.textContent = bank; localStorage.setItem('perya_bank_gallery_dx', String(bank)); }
+setBank(bank);
+
+let ammo = 12, shots = 0, hits = 0, streak = 1;
+function setAmmo(v){ ammo = Math.max(0,v); ammoEl.textContent = ammo; }
+function setHits(v){ hits = v; hitsEl.textContent = hits; updateAcc(); }
+function setShots(v){ shots = v; updateAcc(); }
+function setStreak(v){ streak = Math.max(1, v); streakEl.textContent = streak; }
+function updateAcc(){ const a = shots? Math.round((hits/shots)*100):0; accEl.textContent = a+'%'; }
+
+let roundActive = false;
+let winningsThisRound = 0;
+
+/* =================== Canvas =================== */
+const canvas = document.querySelector('#c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+let mouse = {x: W*0.5, y: H*0.6};
+canvas.addEventListener('pointermove', (e)=>{
+  const r = canvas.getBoundingClientRect();
+  mouse.x = (e.clientX - r.left) * (canvas.width/r.width);
+  mouse.y = (e.clientY - r.top)  * (canvas.height/r.height);
+});
+
+/* =================== RNG =================== */
+function rand(){ const a = new Uint32Array(1); (crypto||window.msCrypto).getRandomValues(a); return a[0]/2**32; }
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(rand()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+
+/* =================== Lanes & Targets (FAIR) =================== */
+const FLOOR_Y = H - 52;
+const lanes = [
+  { y: FLOOR_Y-260, baseSpeed: 1.35 },
+  { y: FLOOR_Y-190, baseSpeed: -1.85 },
+  { y: FLOOR_Y-128, baseSpeed: 2.25 },
+];
+
+const TYPES = {
+  bottle: { r: 20, payout: 1, draw: drawBottle, speedMul: 1.00 },
+  can:    { r: 18, payout: 2, draw: drawCan,    speedMul: 1.08 },
+  duck:   { r: 15, payout: 3, draw: drawDuck,   speedMul: 1.28 }, // smaller + faster
+};
+
+let targets = []; // {x,y,vx,type,alive,spin,phase}
+function spawnTargetsFair(){
+  targets = [];
+  const NB = parseInt(nB.value,10), NC = parseInt(nC.value,10), ND = parseInt(nD.value,10);
+  // bag with exact counts
+  const bag = [ ...Array(NB).fill('bottle'), ...Array(NC).fill('can'), ...Array(ND).fill('duck') ];
+  shuffle(bag);
+
+  // distribute evenly across lanes
+  const perLane = Math.ceil(bag.length / lanes.length);
+  let idx = 0;
+  for(const lane of lanes){
+    const slice = bag.slice(idx, idx+perLane);
+    idx += perLane;
+    const gap = (W + 260) / Math.max(1,slice.length);
+    slice.forEach((type, i)=>{
+      targets.push({
+        x: -140 + i*gap + (rand()*60-30),
+        y: lane.y,
+        vx: lane.baseSpeed * TYPES[type].speedMul,
+        type,
+        alive: true,
+        spin: rand()*Math.PI*2,
+        phase: rand()*Math.PI*2,
+      });
+    });
+  }
+}
+
+/* =================== Shooting & Inputs =================== */
+function shoot(){
+  if(!roundActive || ammo<=0) return;
+  setAmmo(ammo-1);
+  setShots(shots+1);
+
+  // small crosshair recoil sway right after shot
+  recoil = 8;
+
+  // hit test (closest alive under crosshair)
+  let hitTarget = null, hitDist = 1e9;
+  for(const t of targets){
+    if(!t.alive) continue;
+    const rr = TYPES[t.type].r;
+    const d = Math.hypot(mouse.x - t.x, mouse.y - t.y);
+    if(d <= rr + 6 && d < hitDist){ hitTarget = t; hitDist = d; }
+  }
+  if(hitTarget){
+    hitTarget.alive = false;
+    popAnim(hitTarget);
+    setHits(hits+1);
+    setStreak(streak+1);
+    const prizeBase = TYPES[hitTarget.type].payout * parseInt(betEl.value,10);
+    const prize = prizeBase * Math.min(4, streak); // streak multiplier (max x4)
+    winningsThisRound += prize;
+    toast(`Hit! +${prize} (x${TYPES[hitTarget.type].payout} · streak x${streak})`, '#0f7b0f');
+  } else {
+    setStreak(1); // miss resets streak
+  }
+
+  if(ammo===0) toast('Ammo empty — press R to reload', '#b06500');
+}
+canvas.addEventListener('pointerdown', shoot);
+
+window.addEventListener('keydown', (e)=>{
+  if(e.key.toLowerCase()==='r' && roundActive && ammo===0){
+    // reload to configured value
+    setAmmo(Math.max(1, parseInt(nAmmo.value,10)));
+    toast('Reloaded!', '#111');
+  }
+});
+
+/* =================== Effects =================== */
+let bursts = []; // {x,y,t,color}
+function popAnim(t){
+  bursts.push({x:t.x,y:t.y,t:0,color: t.type==='duck' ? '#f2c94c' : (t.type==='bottle' ? '#6db2ff' : '#cfcfcf')});
+}
+
+/* =================== Visuals =================== */
+function drawBG(){
+  // sky gradient
+  const sky = ctx.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0,'#fbfbfb'); sky.addColorStop(1,'#f1f1f1');
+  ctx.fillStyle = sky; ctx.fillRect(0,0,W,H);
+
+  // bunting banners (parallax)
+  for(let k=0;k<3;k++){
+    const y = 40 + k*16;
+    ctx.save();
+    ctx.globalAlpha = 0.14 + k*0.03;
+    ctx.strokeStyle = '#999'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(40,y); ctx.quadraticCurveTo(W/2,y+10,W-40,y); ctx.stroke();
+    ctx.restore();
+  }
+
+  // shelves
+  ctx.fillStyle = '#e6d8b8';
+  for(const lane of lanes){
+    ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.18)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 3;
+    ctx.fillRect(60, lane.y+24, W-120, 12);
+    ctx.restore();
+  }
+
+  // front ledge/floor
+  ctx.fillStyle = '#d9d9d9';
+  ctx.fillRect(0, FLOOR_Y, W, H-FLOOR_Y);
+}
+
+function drawBottle(x,y){
+  ctx.save(); ctx.translate(x,y);
+  // shadow
+  ctx.fillStyle='rgba(0,0,0,.15)'; ctx.beginPath(); ctx.ellipse(0,26,16,6,0,0,Math.PI*2); ctx.fill();
+  // body
+  const g=ctx.createLinearGradient(0,-18,0,20); g.addColorStop(0,'#aad4ff'); g.addColorStop(1,'#579df7');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(0,4, 15, 22, 0, 0, Math.PI*2); ctx.fill();
+  // neck
+  ctx.fillStyle = '#2b6cb0'; ctx.beginPath(); ctx.roundRect(-7,-18,14,12,3); ctx.fill();
+  // highlight
+  ctx.globalAlpha=.22; ctx.fillStyle='#fff'; ctx.beginPath(); ctx.ellipse(-6,0,4,10,0,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1;
+  ctx.restore();
+}
+function drawCan(x,y){
+  ctx.save(); ctx.translate(x,y);
+  ctx.fillStyle='rgba(0,0,0,.15)'; ctx.beginPath(); ctx.ellipse(0,22,14,5,0,0,Math.PI*2); ctx.fill();
+  const g=ctx.createLinearGradient(-12,0,12,0);
+  g.addColorStop(0,'#bdbdbd'); g.addColorStop(0.5,'#f3f3f3'); g.addColorStop(1,'#bdbdbd');
+  ctx.fillStyle=g; ctx.fillRect(-12,-16,24,32);
+  ctx.fillStyle='#8c8c8c'; ctx.fillRect(-12,-16,24,4); ctx.fillRect(-12,12,24,4);
+  ctx.fillStyle='#ff6b6b'; ctx.fillRect(-12,-4,24,8); // stripe
+  ctx.restore();
+}
+function drawDuck(x,y){
+  ctx.save(); ctx.translate(x,y);
+  ctx.fillStyle='rgba(0,0,0,.15)'; ctx.beginPath(); ctx.ellipse(0,20,14,5,0,0,Math.PI*2); ctx.fill();
+  const g=ctx.createLinearGradient(0,-10,0,12); g.addColorStop(0,'#ffd86b'); g.addColorStop(1,'#d4a11b');
+  ctx.fillStyle=g; ctx.beginPath(); ctx.ellipse(0,4, 18, 12, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(-8,-8,8,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#e67e22'; ctx.beginPath(); ctx.moveTo(-18,-6); ctx.lineTo(-6,-6); ctx.lineTo(-6,-1); ctx.lineTo(-18,-3); ctx.closePath(); ctx.fill();
+  ctx.globalAlpha=.20; ctx.fillStyle='#fff'; ctx.beginPath(); ctx.ellipse(-4,0,6,4,0,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1;
+  ctx.restore();
+}
+
+function drawTargets(){
+  for(const t of targets){
+    if(!t.alive) continue;
+    ctx.save();
+    ctx.translate(t.x, t.y + Math.sin(t.phase)*1.2);
+    ctx.rotate(Math.sin(t.spin)*0.05);
+    TYPES[t.type].draw(0,0);
+    ctx.restore();
+  }
+}
+
+function drawBursts(){
+  for(const b of bursts){
+    const a = Math.max(0, 1 - b.t/16);
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.strokeStyle = b.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, 8 + b.t*1.2, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+let recoil = 0; // quick crosshair kick after shot
+function drawCrosshair(){
+  // subtle crosshair sway for challenge
+  const swayX = Math.sin(perf*0.004)*0.7 + (recoil>0 ? (Math.random()*recoil-recoil/2) : 0);
+  const swayY = Math.cos(perf*0.005)*0.7 + (recoil>0 ? (Math.random()*recoil-recoil/2) : 0);
+  const mx = mouse.x + swayX, my = mouse.y + swayY;
+
+  ctx.save();
+  ctx.strokeStyle = '#111';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(mx, my, 10, 0, Math.PI*2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(mx-14, my); ctx.lineTo(mx+14, my);
+  ctx.moveTo(mx, my-14); ctx.lineTo(mx, my+14);
+  ctx.stroke();
+  ctx.restore();
+
+  if(recoil>0) recoil *= 0.85;
+}
+
+function drawHUD(){
+  ctx.fillStyle = '#111';
+  ctx.font = '14px system-ui, sans-serif';
+  ctx.fillText(`Round winnings: ${winningsThisRound}`, 16, 26);
+  if(!roundActive) ctx.fillText('Press "Start" to stake your bet. Click to shoot • R to reload • Adjust counts in Settings.', 16, 46);
+}
+
+/* =================== Update =================== */
+let perf = 0; // time
+let windPhase = rand()*Math.PI*2;
+function update(){
+  perf += 16;
+
+  const windOn = windSel.value==='1';
+  const wind = windOn ? Math.sin(windPhase)*0.25 : 0;
+  windPhase += 0.02;
+
+  for(const t of targets){
+    if(!t.alive) continue;
+    t.x += t.vx + wind; // wind drift
+    t.spin += 0.06;
+    t.phase += 0.04 + Math.abs(t.vx)*0.004;
+    if(t.x < -90) t.x = W+90;
+    if(t.x > W+90) t.x = -90;
+  }
+
+  for(const b of bursts) b.t++;
+  bursts = bursts.filter(b => b.t < 16);
+}
+
+/* =================== Loop =================== */
+let animId=null;
+function loop(){
+  update();
+  drawBG();
+  drawTargets();
+  drawBursts();
+  drawCrosshair();
+  drawHUD();
+  animId = requestAnimationFrame(loop);
+}
+cancelAnimationFrame(animId);
+loop();
+
+/* =================== Round flow =================== */
+function startRound(){
+  if(roundActive) return;
+  const bet = parseInt(betEl.value,10);
+  if(bank < bet){ toast('Not enough tokens.', '#b00020'); return; }
+  setBank(bank - bet);
+
+  // reset stats
+  setAmmo(Math.max(1, parseInt(nAmmo.value,10)));
+  setShots(0); setHits(0); setStreak(1);
+  winningsThisRound = 0;
+
+  spawnTargetsFair();
+  roundActive = true;
+  toast('Round started!', '#111');
+}
+function newRound(){
+  spawnTargetsFair();
+  setAmmo(Math.max(1, parseInt(nAmmo.value,10)));
+  setShots(0); setHits(0); setStreak(1);
+  winningsThisRound = 0;
+}
+function endRound(){
+  roundActive = false;
+  if(winningsThisRound>0){
+    setBank(bank + winningsThisRound);
+    toast(`You won +${winningsThisRound}!`, '#0f7b0f');
+  } else {
+    toast('No hits this time.');
+  }
+}
+
+/* End automatically if everything is dead (all targets shot or ammo spent and no reload) */
+setInterval(()=>{
+  if(!roundActive) return;
+  const anyAlive = targets.some(t=>t.alive);
+  if(!anyAlive || (ammo===0 && shots>0)){ endRound(); }
+}, 600);
+
+/* =================== Buttons =================== */
+startBtn.addEventListener('click', startRound);
+newBtn.addEventListener('click', newRound);
+
+/* =================== Toast helper =================== */
+let toastTimer=null;
+function toast(text, color='#111'){
+  const pill = document.querySelector('.pill');
+  pill.style.background = color;
+  pill.textContent = `Tokens: ${bank} • ${text}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>{
+    pill.style.background = '#111';
+    pill.textContent = `Tokens: ${bank}`;
+  }, 1400);
+}
+</script>
+</body>
+</html>
